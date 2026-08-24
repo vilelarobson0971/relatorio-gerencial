@@ -1576,6 +1576,146 @@
   </div>
 
   <script>
+
+    /* ============================================================
+       SUPABASE - ARMAZENAMENTO VIA API REST
+       ============================================================
+       Antes de usar, crie a tabela abaixo no SQL Editor do Supabase:
+
+       create table if not exists public.relatorio_storage (
+         chave text primary key,
+         dados jsonb not null default '{}'::jsonb,
+         atualizado_em timestamptz not null default now()
+       );
+
+       alter table public.relatorio_storage enable row level security;
+
+       create policy "relatorio_storage_select"
+       on public.relatorio_storage for select
+       to anon
+       using (true);
+
+       create policy "relatorio_storage_insert"
+       on public.relatorio_storage for insert
+       to anon
+       with check (true);
+
+       create policy "relatorio_storage_update"
+       on public.relatorio_storage for update
+       to anon
+       using (true)
+       with check (true);
+
+       A chave usada abaixo é a chave Publishable/anon informada para o
+       projeto. Não use uma service_role key no HTML.
+       ============================================================ */
+
+    const SUPABASE_REST_URL = 'https://tjyiazrhiqthgbyqtqqt.supabase.co/rest/v1';
+    const SUPABASE_ANON_KEY = 'sb_publishable_M-6MvG9xGiFfofPDjkfzqw_ufl7ghde';
+    const SUPABASE_STORAGE_TABLE = 'relatorio_storage';
+
+    const supabaseHeaders = {
+      'apikey': SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json'
+    };
+
+    async function supabaseGet(chave) {
+      const url = `${SUPABASE_REST_URL}/${SUPABASE_STORAGE_TABLE}?chave=eq.${encodeURIComponent(chave)}&select=dados`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: supabaseHeaders
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`Supabase GET ${chave}: ${response.status} ${detail}`);
+      }
+
+      const rows = await response.json();
+      return rows.length ? rows[0].dados : null;
+    }
+
+    async function supabaseSet(chave, dados) {
+      const url = `${SUPABASE_REST_URL}/${SUPABASE_STORAGE_TABLE}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          ...supabaseHeaders,
+          'Prefer': 'resolution=merge-duplicates,return=minimal'
+        },
+        body: JSON.stringify({
+          chave,
+          dados,
+          atualizado_em: new Date().toISOString()
+        })
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`Supabase UPSERT ${chave}: ${response.status} ${detail}`);
+      }
+    }
+
+    async function persistSupabase(chave, dados, onSuccess) {
+      try {
+        await supabaseSet(chave, dados);
+        if (typeof onSuccess === 'function') onSuccess();
+      } catch (error) {
+        console.error(error);
+        alert(`Não foi possível salvar os dados no Supabase.\n\n${error.message}`);
+      }
+    }
+
+    async function loadSupabaseData() {
+      try {
+        const [
+          recordsDB,
+          trainingsDB,
+          gastosDB,
+          thirdTasksDB,
+          purchasingDB,
+          planningDB
+        ] = await Promise.all([
+          supabaseGet('brasanitas_antes_depois'),
+          supabaseGet('brasanitas_treinamentos'),
+          supabaseGet('brasanitas_gastos_servicos'),
+          supabaseGet('brasanitas_terceiros_tasks'),
+          supabaseGet('brasanitas_base_compras'),
+          supabaseGet('brasanitas_base_planejamento')
+        ]);
+
+        if (typeof records !== 'undefined' && recordsDB !== null) records = recordsDB;
+        if (typeof trainings !== 'undefined' && trainingsDB !== null) trainings = trainingsDB;
+        if (typeof gastosServicos !== 'undefined' && gastosDB !== null) gastosServicos = gastosDB;
+        if (typeof thirdTasks !== 'undefined' && thirdTasksDB !== null) thirdTasks = thirdTasksDB;
+        if (typeof purchasingData !== 'undefined' && purchasingDB !== null) purchasingData = purchasingDB;
+        if (typeof planningData !== 'undefined' && planningDB !== null) planningData = planningDB;
+
+        return true;
+      } catch (error) {
+        console.error('Falha ao carregar dados do Supabase:', error);
+        alert(
+          'Não foi possível carregar os dados do banco de dados Supabase.\n\n' +
+          'Verifique se a tabela "relatorio_storage" foi criada e se as políticas RLS foram configuradas.\n\n' +
+          error.message
+        );
+        return false;
+      }
+    }
+
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        if (!file) {
+          reject(new Error('Arquivo de imagem não selecionado.'));
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = event => resolve(event.target.result);
+        reader.onerror = () => reject(new Error('Não foi possível ler o arquivo de imagem.'));
+        reader.readAsDataURL(file);
+      });
+    }
     // Configurações padrão para Gráficos de Porcentagem (Eixo Y de 0 a 100 de 10 em 10)
     Chart.register(ChartDataLabels);
     Chart.defaults.plugins.datalabels = {
@@ -1971,37 +2111,53 @@
     function openLightbox(imageSrc, captionText) { document.getElementById('lightbox-img').src = imageSrc; document.getElementById('lightbox-caption').innerText = captionText; document.getElementById('lightbox').classList.add('active'); }
     function closeLightbox() { document.getElementById('lightbox').classList.remove('active'); }
 
-    let records = JSON.parse(localStorage.getItem('brasanitas_antes_depois')) || [];
+    let records = [];
 
-    function saveRecord(e) {
+    async function saveRecord(e) {
       e.preventDefault();
       const local = document.getElementById('input-local').value;
       const data = document.getElementById('input-data').value;
       const fotoAntesInput = document.getElementById('input-foto-antes').files[0];
       const fotoDepoisInput = document.getElementById('input-foto-depois').files[0];
 
-      const readerAntes = new FileReader();
-      const readerDepois = new FileReader();
+      try {
+        const [fotoAntes, fotoDepois] = await Promise.all([
+          fileToDataURL(fotoAntesInput),
+          fileToDataURL(fotoDepoisInput)
+        ]);
 
-      readerAntes.onload = function(eAntes) {
-        readerDepois.onload = function(eDepois) {
-          const newRecord = { id: Date.now(), local, data, fotoAntes: eAntes.target.result, fotoDepois: eDepois.target.result };
-          records.unshift(newRecord);
-          localStorage.setItem('brasanitas_antes_depois', JSON.stringify(records));
-          renderRecords();
-          closeModal();
+        const newRecord = {
+          id: Date.now(),
+          local,
+          data,
+          fotoAntes,
+          fotoDepois
         };
-        readerDepois.readAsDataURL(fotoDepoisInput);
-      };
-      readerAntes.readAsDataURL(fotoAntesInput);
+
+        records.unshift(newRecord);
+        await persistSupabase('brasanitas_antes_depois', records);
+        renderRecords();
+        closeModal();
+      } catch (error) {
+        console.error(error);
+        alert(`Não foi possível salvar o registro.\n\n${error.message}`);
+      }
     }
 
-    function deleteRecord(id, e) {
+    async function deleteRecord(id, e) {
       e.stopPropagation();
-      if(confirm("Deseja realmente excluir este registro?")) {
+      if (confirm("Deseja realmente excluir este registro?")) {
+        const previousRecords = records;
         records = records.filter(r => r.id !== id);
-        localStorage.setItem('brasanitas_antes_depois', JSON.stringify(records));
-        renderRecords();
+
+        try {
+          await supabaseSet('brasanitas_antes_depois', records);
+          renderRecords();
+        } catch (error) {
+          records = previousRecords;
+          console.error(error);
+          alert(`Não foi possível excluir o registro.\n\n${error.message}`);
+        }
       }
     }
 
@@ -2070,7 +2226,7 @@
       { id: 4, nome: "Tre. PTA", grupo: "GERAL", dataRealizada: "2026-04-01", duracao: "1 ano", responsavel: "", telefone: "", email: "", valor: "", obs: "" }
     ];
 
-    let trainings = JSON.parse(localStorage.getItem('brasanitas_treinamentos')) || defaultTrainings;
+    let trainings = defaultTrainings.slice();
 
     // Lógica do Calendário Visual
     let currentCalYear = new Date().getFullYear();
@@ -2270,7 +2426,7 @@
       document.getElementById('modal-training').classList.remove('active');
     }
 
-    function saveTraining(e) {
+    async function saveTraining(e) {
       e.preventDefault();
       const id = document.getElementById('training-id').value;
 
@@ -2293,23 +2449,23 @@
         trainings.push(newTraining);
       }
 
-      localStorage.setItem('brasanitas_treinamentos', JSON.stringify(trainings));
+      await persistSupabase('brasanitas_treinamentos', trainings);
       renderTrainings();
       closeTrainingModal();
     }
 
-    function deleteTrainingFromModal() {
+    async function deleteTrainingFromModal() {
       const id = parseInt(document.getElementById('training-id').value, 10);
       if (id && confirm("Tem certeza que deseja excluir este treinamento?")) {
         trainings = trainings.filter(t => t.id !== id);
-        localStorage.setItem('brasanitas_treinamentos', JSON.stringify(trainings));
+        await persistSupabase('brasanitas_treinamentos', trainings);
         renderTrainings();
         closeTrainingModal();
       }
     }
 
     /* DETALHAMENTO DE GASTOS PREVENTIVOS E CORRETIVOS */
-    let gastosServicos = JSON.parse(localStorage.getItem('brasanitas_gastos_servicos')) || [];
+    let gastosServicos = [];
 
     function renderGastosServicos() {
       const container = document.getElementById('gastos-servicos-list');
@@ -2348,7 +2504,7 @@
       document.getElementById('modal-gasto-servico').classList.remove('active');
     }
 
-    function saveGastoServico(e) {
+    async function saveGastoServico(e) {
       e.preventDefault();
       const newGasto = {
         id: Date.now(),
@@ -2359,21 +2515,21 @@
       };
 
       gastosServicos.push(newGasto);
-      localStorage.setItem('brasanitas_gastos_servicos', JSON.stringify(gastosServicos));
+      await persistSupabase('brasanitas_gastos_servicos', gastosServicos);
       renderGastosServicos();
       closeGastoServicoModal();
     }
 
-    function deleteGastoServico(id) {
+    async function deleteGastoServico(id) {
       if (confirm("Deseja realmente excluir este serviço detalhado?")) {
         gastosServicos = gastosServicos.filter(g => g.id !== id);
-        localStorage.setItem('brasanitas_gastos_servicos', JSON.stringify(gastosServicos));
+        await persistSupabase('brasanitas_gastos_servicos', gastosServicos);
         renderGastosServicos();
       }
     }
 
     /* ABA TERCEIROS, DETRATORES, BACKLOG DE PREVENTIVAS E RECOMENDAÇÕES */
-    let thirdTasks = JSON.parse(localStorage.getItem('brasanitas_terceiros_tasks')) || {
+    const defaultThirdTasks = {
       incendio: [
         { id: 1, desc: "NÃO TIVEMOS REGISTRO DE ATIVIDADES DA JCI NO INFRASPEAK", type: "status_data", status: "Pendente", date: "2024-03-01", obs: "" }
       ],
@@ -2387,6 +2543,8 @@
       gestao_infraspeak: [],
       recomendacoes: []
     };
+
+    let thirdTasks = JSON.parse(JSON.stringify(defaultThirdTasks));
 
     function renderThirdTasks() {
       ['incendio', 'terceiros', 'detratores', 'backlog_preventivas', 'gestao_infraspeak', 'recomendacoes'].forEach(sec => {
@@ -2501,7 +2659,7 @@
       document.getElementById('modal-third-task').classList.remove('active');
     }
 
-    function saveThirdTask(e) {
+    async function saveThirdTask(e) {
       e.preventDefault();
       const section = document.getElementById('third-task-section').value;
       const id = document.getElementById('third-task-id').value;
@@ -2531,18 +2689,18 @@
         thirdTasks[section].push(newTask);
       }
 
-      localStorage.setItem('brasanitas_terceiros_tasks', JSON.stringify(thirdTasks));
+      await persistSupabase('brasanitas_terceiros_tasks', thirdTasks);
       renderThirdTasks();
       closeThirdTaskModal();
     }
 
-    function deleteThirdTaskFromModal() {
+    async function deleteThirdTaskFromModal() {
       const section = document.getElementById('third-task-section').value;
       const id = parseInt(document.getElementById('third-task-id').value, 10);
 
       if (id && confirm("Deseja excluir esta atividade?")) {
         thirdTasks[section] = thirdTasks[section].filter(t => t.id !== id);
-        localStorage.setItem('brasanitas_terceiros_tasks', JSON.stringify(thirdTasks));
+        await persistSupabase('brasanitas_terceiros_tasks', thirdTasks);
         renderThirdTasks();
         closeThirdTaskModal();
       }
@@ -2667,7 +2825,7 @@
       }
     ];
 
-    let purchasingData = JSON.parse(localStorage.getItem('brasanitas_base_compras')) || {};
+    let purchasingData = {};
 
     function toggleMainPurchasingGroup(id) {
       document.getElementById(`main-purchasing-group-${id}`).classList.toggle('open');
@@ -2748,18 +2906,18 @@
       });
     }
 
-    function updatePurchasingValue(subId, month, field, value) {
+    async function updatePurchasingValue(subId, month, field, value) {
       if (!purchasingData[subId]) purchasingData[subId] = {};
       if (!purchasingData[subId][month]) purchasingData[subId][month] = {};
       purchasingData[subId][month][field] = value;
-      localStorage.setItem('brasanitas_base_compras', JSON.stringify(purchasingData));
+      await persistSupabase('brasanitas_base_compras', purchasingData);
     }
 
-    function deleteMonthFromPurchasingSub(subId, month) {
+    async function deleteMonthFromPurchasingSub(subId, month) {
       if (confirm(`Tem certeza que deseja excluir o mês de ${month}?`)) {
         if (purchasingData[subId] && purchasingData[subId][month]) {
           delete purchasingData[subId][month];
-          localStorage.setItem('brasanitas_base_compras', JSON.stringify(purchasingData));
+          await persistSupabase('brasanitas_base_compras', purchasingData);
           renderBasePurchasing();
           const targetGroup = document.getElementById(`sub-purchasing-group-${subId}`);
           if (targetGroup) targetGroup.classList.add('open');
@@ -2767,7 +2925,7 @@
       }
     }
 
-    function addMonthToPurchasingSub(subId) {
+    async function addMonthToPurchasingSub(subId) {
       if (!purchasingData[subId]) purchasingData[subId] = {};
 
       const existingMonths = Object.keys(purchasingData[subId]);
@@ -2800,7 +2958,7 @@
           foundSub.fields.forEach(f => purchasingData[subId][nextMonthLabel][f] = "");
         }
 
-        localStorage.setItem('brasanitas_base_compras', JSON.stringify(purchasingData));
+        await persistSupabase('brasanitas_base_compras', purchasingData);
         renderBasePurchasing();
 
         const targetGroup = document.getElementById(`sub-purchasing-group-${subId}`);
@@ -2968,7 +3126,7 @@
     const currentYear = new Date().getFullYear();
     const defaultMonths = [`Jan`, `Fev`, `Mar`, `Abr`, `Mai`, `Jun`, `Jul`].map(m => `${m} ${currentYear}`);
 
-    let planningData = JSON.parse(localStorage.getItem('brasanitas_base_planejamento')) || {};
+    let planningData = {};
 
     function toggleMainGroup(id) {
       document.getElementById(`main-group-${id}`).classList.toggle('open');
@@ -3051,18 +3209,18 @@
       });
     }
 
-    function updatePlanningValue(subId, month, field, value) {
+    async function updatePlanningValue(subId, month, field, value) {
       if (!planningData[subId]) planningData[subId] = {};
       if (!planningData[subId][month]) planningData[subId][month] = {};
       planningData[subId][month][field] = hoursIndicatorIds.has(subId) ? hhmmToHours(value) : value;
-      localStorage.setItem('brasanitas_base_planejamento', JSON.stringify(planningData));
+      await persistSupabase('brasanitas_base_planejamento', planningData);
     }
 
-    function deleteMonthFromSub(subId, month) {
+    async function deleteMonthFromSub(subId, month) {
       if (confirm(`Tem certeza que deseja excluir o mês de ${month}?`)) {
         if (planningData[subId] && planningData[subId][month]) {
           delete planningData[subId][month];
-          localStorage.setItem('brasanitas_base_planejamento', JSON.stringify(planningData));
+          await persistSupabase('brasanitas_base_planejamento', planningData);
           renderBasePlanning();
           const targetGroup = document.getElementById(`sub-group-${subId}`);
           if (targetGroup) targetGroup.classList.add('open');
@@ -3070,7 +3228,7 @@
       }
     }
 
-    function addMonthToSub(subId) {
+    async function addMonthToSub(subId) {
       if (!planningData[subId]) planningData[subId] = {};
 
       const existingMonths = Object.keys(planningData[subId]);
@@ -3103,7 +3261,7 @@
           foundSub.fields.forEach(f => planningData[subId][nextMonthLabel][f] = "");
         }
 
-        localStorage.setItem('brasanitas_base_planejamento', JSON.stringify(planningData));
+        await persistSupabase('brasanitas_base_planejamento', planningData);
         renderBasePlanning();
 
         const targetGroup = document.getElementById(`sub-group-${subId}`);
@@ -3551,13 +3709,20 @@
     }
 
     // Inicialização da página
-    window.onload = function() {
+    window.onload = async function() {
       initLogin();
+
+      const databaseReady = await loadSupabaseData();
+      if (!databaseReady) return;
+
       renderRecords();
       renderTrainings();
       initCalendarOptions();
       renderPlanejamento();
       renderThirdCharts();
+      renderBasePlanning();
+      renderBasePurchasing();
+      renderComprasPage();
       addOpenChartButtons();
     };
   </script>
